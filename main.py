@@ -14,14 +14,14 @@ logging.basicConfig(
 )
 
 # -------------------------------------------------------------
-# RENDER & UPTIMEROBOT WEB SERVER (HEALTH CHECK)
+# WEB SERVER FOR RENDER & UPTIMEROBOT
 # -------------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot is running alive!")
+        self.wfile.write(b"Bot is alive!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -32,22 +32,25 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         return
 
 def start_health_check_server():
-    port = int(os.getenv("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    logging.info(f"🌐 वेब सर्वर पोर्ट {port} पर चालू हो गया है...")
-    server.serve_forever()
+    try:
+        port_env = os.getenv("PORT", "8080")
+        port = int(port_env)
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        logging.info(f"🌐 वेब सर्वर पोर्ट {port} पर सफलतापूर्वक चालू हो गया है...")
+        server.serve_forever()
+    except Exception as e:
+        logging.error(f"वेब सर्वर शुरू करने में त्रुटि: {e}")
 
 # -------------------------------------------------------------
-# RENDER CONFIGURATION (ENVIRONMENT VARIABLES)
+# CONFIGURATION
 # -------------------------------------------------------------
 COSMIC_API_KEY = os.getenv("COSMIC_API_KEY", "")
 COSMIC_API_SECRET = os.getenv("COSMIC_API_SECRET", "")
 LIVE_TRADING_ENV = os.getenv("LIVE_TRADING", "0")
 LIVE_TRADING = True if LIVE_TRADING_ENV == "1" else False
 
-# Trading Settings
-SYMBOL = "BTCUSDT"       # ब्रोकर के अनुसार सही सिंबल BTCUSDT है
-TRADE_AMOUNT = 0.02      # प्रति ट्रेड BTC की मात्रा (0.02 फिक्स की गई)
+SYMBOL = "BTCUSDT"
+TRADE_AMOUNT = 0.02
 
 # -------------------------------------------------------------
 # BROKER CLASS
@@ -57,21 +60,19 @@ class CosmicBroker:
         self.api_key = api_key
         self.api_secret = api_secret
         self.live_trading = live_trading
-        self.base_url = "https://api.cosmictrade.io"  # ब्रोकर API बेस URL
+        self.base_url = "https://api.cosmictrade.io"
 
     def get_market_price(self, symbol):
-        """वर्तमान मार्केट प्राइस प्राप्त करना"""
         try:
             url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
             res = requests.get(url, timeout=5)
             if res.status_code == 200:
                 return float(res.json().get("price", 0))
         except Exception as e:
-            logging.error(f"मूल्य प्राप्त करने में त्रुटि ({symbol}): {e}")
+            logging.error(f"मूल्य प्राप्त करने में त्रुटि: {e}")
         return None
 
     def get_1m_signal(self, symbol):
-        """1-मिनट (1m) टाइमफ्रेम पर सिग्नल प्राप्त करना"""
         try:
             url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=2"
             res = requests.get(url, timeout=5)
@@ -81,29 +82,25 @@ class CosmicBroker:
                 close_p = float(data[-1][4])
                 return "BUY" if close_p >= open_p else "SELL"
         except Exception as e:
-            logging.error(f"1m सिग्नल त्रुटि ({symbol}): {e}")
+            logging.error(f"1m सिग्नल त्रुटि: {e}")
         return None
 
     def execute_order(self, symbol, side, amount):
-        """ट्रेड ऑर्डर निष्पादित करना"""
         if not self.live_trading:
             logging.info(f"🧪 [PAPER MODE] सिमुलेशन ट्रेड -> {side} {amount} {symbol}")
             return {"status": "SUCCESS", "mode": "PAPER"}
 
         logging.info(f"🚨 [LIVE MODE] ब्रोकर को ऑर्डर भेजा जा रहा है -> {side} {amount} {symbol}")
-        
         headers = {
             "X-API-KEY": self.api_key,
             "Content-Type": "application/json"
         }
-        
         payload = {
             "symbol": symbol,
-            "side": side.upper(),   # BUY या SELL
+            "side": side.upper(),
             "type": "MARKET",
             "quantity": amount
         }
-        
         try:
             endpoint = f"{self.base_url}/v1/order"
             response = requests.post(endpoint, json=payload, headers=headers, timeout=10)
@@ -115,23 +112,20 @@ class CosmicBroker:
             return None
 
 # -------------------------------------------------------------
-# MAIN BOT ENGINE
+# MAIN ENGINE
 # -------------------------------------------------------------
 def run_bot():
-    # वेब सर्वर को बैकग्राउंड थ्रेड में चालू करना
     server_thread = threading.Thread(target=start_health_check_server, daemon=True)
     server_thread.start()
 
     logging.info("==========================================")
     logging.info(f"🤖 ट्रेडिंग बॉट प्रारंभ हो रहा है...")
-    logging.info(f"सिंबल (Pair): {SYMBOL}")
-    logging.info(f"लॉट साइज: {TRADE_AMOUNT}")
-    logging.info(f"लाइव ट्रेडिंग स्थिति: {'🔴 LIVE (असली पैसा)' if LIVE_TRADING else '🟢 PAPER (सिमुलेशन)'}")
+    logging.info(f"सिंबल: {SYMBOL} | लॉट साइज: {TRADE_AMOUNT}")
+    logging.info(f"लाइव ट्रेडिंग: {'🔴 LIVE' if LIVE_TRADING else '🟢 PAPER'}")
     logging.info("==========================================")
 
     broker = CosmicBroker(COSMIC_API_KEY, COSMIC_API_SECRET, live_trading=LIVE_TRADING)
-    
-    current_position = None  # None, 'BUY', 'SELL'
+    current_position = None
 
     while True:
         try:
@@ -140,8 +134,6 @@ def run_bot():
 
             if price and signal:
                 logging.info(f"📊 {SYMBOL} मूल्य: ${price:.2f} | 1m सिग्नल: {signal}")
-
-                # 1m सिग्नल के अनुसार ट्रेड निष्पादित करना
                 if signal == "BUY" and current_position != "BUY":
                     broker.execute_order(SYMBOL, "BUY", TRADE_AMOUNT)
                     current_position = "BUY"
@@ -149,10 +141,9 @@ def run_bot():
                     broker.execute_order(SYMBOL, "SELL", TRADE_AMOUNT)
                     current_position = "SELL"
 
-            time.sleep(10)  # हर 10 सेकंड में 1m कैंडल डेटा चेक करेगा
-
+            time.sleep(10)
         except Exception as e:
-            logging.error(f"मेन लूप एरर: {e}")
+            logging.error(f"लूप त्रुटि: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
