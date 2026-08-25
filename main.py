@@ -42,7 +42,7 @@ class CosmicBroker:
     def get_1m_candles(self, symbol, limit=60):
         try:
             r = requests.get(
-                "https://api.binance.com/api/v3/klines",
+                "https://api.mexc.comapi/v3/klines",
                 params={
                     "symbol": symbol,
                     "interval": "1m",
