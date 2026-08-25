@@ -2,22 +2,60 @@ import os
 import time
 import logging
 import requests
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
+# -------------------------------------------------------------
+# LOGGING SETUP
+# -------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
+# -------------------------------------------------------------
+# WEB SERVER FOR RENDER & UPTIMEROBOT (HEALTH CHECK)
+# -------------------------------------------------------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+def start_health_check_server():
+    try:
+        port_env = os.getenv("PORT", "8080")
+        port = int(port_env)
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        logging.info(f"🌐 वेब सर्वर पोर्ट {port} पर सफलतापूर्वक चालू हो गया है...")
+        server.serve_forever()
+    except Exception as e:
+        logging.error(f"वेब सर्वर त्रुटि: {e}")
+
+# -------------------------------------------------------------
+# CONFIGURATION (ENVIRONMENT VARIABLES)
+# -------------------------------------------------------------
 COSMIC_API_KEY = os.getenv("COSMIC_API_KEY", "")
 COSMIC_API_SECRET = os.getenv("COSMIC_API_SECRET", "")
-LIVE_TRADING = os.getenv("LIVE_TRADING", "0") == "1"
+LIVE_TRADING_ENV = os.getenv("LIVE_TRADING", "0")
+LIVE_TRADING = True if LIVE_TRADING_ENV == "1" else False
 
+# Trading Settings
 SYMBOL = "BTCUSDT"
-TIMEFRAME = "1m"
 TRADE_AMOUNT = 0.02
-CHECK_SECONDS = 5
 
-
+# -------------------------------------------------------------
+# BROKER CLASS
+# -------------------------------------------------------------
 class CosmicBroker:
     def __init__(self, api_key, api_secret, live_trading=False):
         self.api_key = api_key
@@ -26,214 +64,100 @@ class CosmicBroker:
         self.base_url = "https://api.cosmictrade.io"
 
     def get_market_price(self, symbol):
+        """MEXC API से लाइव प्राइस (Render IP restrictions bypass करने के लिए)"""
         try:
-            r = requests.get(
-                "https://api.binance.com/api/v3/ticker/price",
-                params={"symbol": symbol},
-                timeout=5
-            )
-            if r.status_code == 200:
-                return float(r.json()["price"])
-            logging.error("Price API HTTP %s", r.status_code)
+            url = f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}"
+            res = requests.get(url, timeout=5)
+            if res.status_code == 200:
+                return float(res.json().get("price", 0))
+            else:
+                logging.error(f"Price API Error: Status {res.status_code}")
         except Exception as e:
-            logging.error("Price error: %s", e)
+            logging.error(f"मूल्य प्राप्त करने में त्रुटि ({symbol}): {e}")
         return None
 
-    def get_1m_candles(self, symbol, limit=60):
+    def get_1m_signal(self, symbol):
+        """MEXC API से 1m कैंडल सिग्नल"""
         try:
-            r = requests.get(
-                "https://api.mexc.comapi/v3/klines",
-                params={
-                    "symbol": symbol,
-                    "interval": "1m",
-                    "limit": limit
-                },
-                timeout=5
-            )
-            if r.status_code != 200:
-                logging.error("1m candle HTTP %s", r.status_code)
-                return []
-
-            data = r.json()
-            if len(data) < 10:
-                return []
-
-            # Current unfinished candle is excluded.
-            return [
-                {
-                    "open": float(k[1]),
-                    "high": float(k[2]),
-                    "low": float(k[3]),
-                    "close": float(k[4]),
-                    "volume": float(k[5]),
-                    "time": int(k[0])
-                }
-                for k in data[:-1]
-            ]
+            url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=1m&limit=2"
+            res = requests.get(url, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                open_p = float(data[-1][1])
+                close_p = float(data[-1][4])
+                return "BUY" if close_p >= open_p else "SELL"
+            else:
+                logging.error(f"1m Candle API Error: Status {res.status_code}")
         except Exception as e:
-            logging.error("1m candle error: %s", e)
-            return []
-
-    def get_1m_signal(self, candles):
-        if len(candles) < 10:
-            return "WAIT"
-
-        last = candles[-1]
-        prev = candles[-2]
-
-        candle_range = last["high"] - last["low"]
-        if candle_range <= 0:
-            return "WAIT"
-
-        body = abs(last["close"] - last["open"])
-
-        # Avoid very weak/doji candles.
-        if body < candle_range * 0.20:
-            return "WAIT"
-
-        if last["close"] > last["open"] and last["close"] > prev["close"]:
-            return "BUY"
-
-        if last["close"] < last["open"] and last["close"] < prev["close"]:
-            return "SELL"
-
-        return "WAIT"
+            logging.error(f"1m सिग्नल त्रुटि ({symbol}): {e}")
+        return None
 
     def execute_order(self, symbol, side, amount):
+        """ट्रेड ऑर्डर निष्पादित करना"""
         if not self.live_trading:
-            logging.info(
-                "[PAPER] %s %.6f %s",
-                side, amount, symbol
-            )
-            return {
-                "status": "SUCCESS",
-                "mode": "PAPER",
-                "side": side,
-                "quantity": amount
-            }
+            logging.info(f"🧪 [PAPER MODE] सिमुलेशन ट्रेड -> {side} {amount} {symbol}")
+            return {"status": "SUCCESS", "mode": "PAPER"}
 
-        if not self.api_key or not self.api_secret:
-            logging.error("COSMIC_API_KEY / COSMIC_API_SECRET missing")
-            return None
-
-        # IMPORTANT:
-        # This is the endpoint/header format from your supplied code.
-        # Do not assume it is correct for Cosmic until Cosmic confirms it.
+        logging.info(f"🚨 [LIVE MODE] ब्रोकर को ऑर्डर भेजा जा रहा है -> {side} {amount} {symbol}")
+        
         headers = {
             "X-API-KEY": self.api_key,
             "Content-Type": "application/json"
         }
-
+        
         payload = {
             "symbol": symbol,
             "side": side.upper(),
             "type": "MARKET",
             "quantity": amount
         }
-
+        
         try:
-            response = requests.post(
-                f"{self.base_url}/v1/order",
-                json=payload,
-                headers=headers,
-                timeout=10
-            )
-
-            try:
-                result = response.json()
-            except Exception:
-                result = {
-                    "status_code": response.status_code,
-                    "text": response.text
-                }
-
-            logging.info("Broker response: %s", result)
+            endpoint = f"{self.base_url}/v1/order"
+            response = requests.post(endpoint, json=payload, headers=headers, timeout=10)
+            result = response.json()
+            logging.info(f"ब्रोकर प्रतिक्रिया: {result}")
             return result
-
         except Exception as e:
-            logging.error("Live order error: %s", e)
+            logging.error(f"लाइव ऑर्डर भेजने में त्रुटि: {e}")
             return None
 
-
+# -------------------------------------------------------------
+# MAIN BOT ENGINE
+# -------------------------------------------------------------
 def run_bot():
+    server_thread = threading.Thread(target=start_health_check_server, daemon=True)
+    server_thread.start()
+
     logging.info("==========================================")
-    logging.info("1-MINUTE LOW-CAPITAL BOT STARTED")
-    logging.info("Symbol: %s", SYMBOL)
-    logging.info("Timeframe: %s", TIMEFRAME)
-    logging.info("Lot size: %.6f BTC", TRADE_AMOUNT)
-    logging.info(
-        "Mode: %s",
-        "LIVE" if LIVE_TRADING else "PAPER"
-    )
+    logging.info("🤖 ट्रेडिंग बॉट प्रारंभ हो रहा है...")
+    logging.info(f"सिंबल: {SYMBOL} | लॉट साइज: {TRADE_AMOUNT}")
+    logging.info(f"लाइव ट्रेडिंग: {'🔴 LIVE' if LIVE_TRADING else '🟢 PAPER'}")
     logging.info("==========================================")
 
-    broker = CosmicBroker(
-        COSMIC_API_KEY,
-        COSMIC_API_SECRET,
-        LIVE_TRADING
-    )
-
+    broker = CosmicBroker(COSMIC_API_KEY, COSMIC_API_SECRET, live_trading=LIVE_TRADING)
     current_position = None
-    last_signal_candle = None
 
     while True:
         try:
             price = broker.get_market_price(SYMBOL)
-            if price:
-                logging.info(
-                    "%s 1m price: $%.2f",
-                    SYMBOL, price
-                )
+            signal = broker.get_1m_signal(SYMBOL)
 
-            candles = broker.get_1m_candles(SYMBOL, 60)
-            if not candles:
-                time.sleep(CHECK_SECONDS)
-                continue
+            if price and signal:
+                logging.info(f"📊 {SYMBOL} मूल्य: ${price:.2f} | 1m सिग्नल: {signal}")
 
-            signal = broker.get_1m_signal(candles)
-            candle_time = candles[-1]["time"]
+                if signal == "BUY" and current_position != "BUY":
+                    broker.execute_order(SYMBOL, "BUY", TRADE_AMOUNT)
+                    current_position = "BUY"
+                elif signal == "SELL" and current_position != "SELL":
+                    broker.execute_order(SYMBOL, "SELL", TRADE_AMOUNT)
+                    current_position = "SELL"
 
-            logging.info("1m signal: %s", signal)
+            time.sleep(10)
 
-            # One order attempt per closed 1m candle.
-            if (
-                candle_time != last_signal_candle
-                and signal in ("BUY", "SELL")
-            ):
-                if signal != current_position:
-                    result = broker.execute_order(
-                        SYMBOL,
-                        signal,
-                        TRADE_AMOUNT
-                    )
-
-                    if result and (
-                        result.get("status") in ("SUCCESS", "FILLED")
-                        or result.get("mode") == "PAPER"
-                        or result.get("ok") is True
-                    ):
-                        current_position = signal
-                        logging.info(
-                            "ORDER SUCCESS: %s | Qty %.6f",
-                            signal, TRADE_AMOUNT
-                        )
-                    else:
-                        logging.error(
-                            "ORDER NOT CONFIRMED: %s",
-                            result
-                        )
-
-                last_signal_candle = candle_time
-
-            time.sleep(CHECK_SECONDS)
-
-        except KeyboardInterrupt:
-            logging.info("Bot stopped.")
-            break
         except Exception as e:
-            logging.error("Main loop error: %s", e)
+            logging.error(f"मेन लूप त्रुटि: {e}")
             time.sleep(5)
-
 
 if __name__ == "__main__":
     run_bot()
