@@ -61,10 +61,10 @@ class CosmicBroker:
         self.api_key = api_key
         self.api_secret = api_secret
         self.live_trading = live_trading
-        self.base_url = "https://api.cosmictrade.io"
+        self.base_url = "https://api.cosmic.trade"
 
     def get_market_price(self, symbol):
-        """MEXC API से लाइव प्राइस (Render IP restrictions bypass करने के लिए)"""
+        """MEXC API से लाइव प्राइस (Render IP restriction bypass करने के लिए)"""
         try:
             url = f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}"
             res = requests.get(url, timeout=5)
@@ -93,12 +93,12 @@ class CosmicBroker:
         return None
 
     def execute_order(self, symbol, side, amount):
-        """ट्रेड ऑर्डर निष्पादित करना"""
+        """लाइव ब्रोकर को ऑर्डर भेजना"""
         if not self.live_trading:
             logging.info(f"🧪 [PAPER MODE] सिमुलेशन ट्रेड -> {side} {amount} {symbol}")
             return {"status": "SUCCESS", "mode": "PAPER"}
 
-        logging.info(f"🚨 [LIVE MODE] ब्रोकर को ऑर्डर भेजा जा रहा है -> {side} {amount} {symbol}")
+        logging.info(f"🚨 [LIVE MODE] Cosmic Trade को ऑर्डर भेजा जा रहा है -> {side} {amount} {symbol}")
         
         headers = {
             "X-API-KEY": self.api_key,
